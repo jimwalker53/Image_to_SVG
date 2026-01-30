@@ -1,19 +1,10 @@
-import Jimp from 'jimp';
+import sharp from 'sharp';
 import potrace, { type PotraceOptions } from 'potrace';
 import type {
   VectorizationSettings,
   ConversionResult,
-  Layer,
   LayerInfo,
-  PathData,
-  Point,
 } from '../types/index.js';
-import {
-  simplifyPath,
-  smoothPath,
-  calculatePolygonArea,
-  countPoints,
-} from '../utils/pathUtils.js';
 import {
   kMeansQuantize,
   rgbToHex,
@@ -36,7 +27,6 @@ function potraceTrace(file: Buffer, options: PotraceOptions): Promise<string> {
 
 // Maximum image dimension for processing
 const MAX_DIMENSION = 4000;
-const DEFAULT_DPI = 96;
 
 export class Vectorizer {
   /**
@@ -48,48 +38,55 @@ export class Vectorizer {
   ): Promise<ConversionResult> {
     const startTime = Date.now();
 
-    // Load and preprocess image
-    const image = await Jimp.read(imageBuffer);
-    const originalWidth = image.getWidth();
-    const originalHeight = image.getHeight();
+    // Get image metadata
+    const metadata = await sharp(imageBuffer).metadata();
+    const originalWidth = metadata.width || 800;
+    const originalHeight = metadata.height || 600;
 
-    // Resize if needed
+    // Resize if needed, keeping aspect ratio
+    let processedBuffer = imageBuffer;
+    let width = originalWidth;
+    let height = originalHeight;
+
     if (originalWidth > MAX_DIMENSION || originalHeight > MAX_DIMENSION) {
       const scale = MAX_DIMENSION / Math.max(originalWidth, originalHeight);
-      image.scale(scale);
+      width = Math.round(originalWidth * scale);
+      height = Math.round(originalHeight * scale);
+      processedBuffer = await sharp(imageBuffer)
+        .resize(width, height, { fit: 'inside' })
+        .toBuffer();
     }
 
-    let layers: Layer[];
+    let svg: string;
+    let layers: LayerInfo[];
 
     switch (settings.mode) {
       case 'silhouette':
-        layers = await this.processSilhouette(image, settings);
+        ({ svg, layers } = await this.processSilhouette(processedBuffer, settings, width, height));
         break;
       case 'multicolor':
-        layers = await this.processMulticolor(image, settings);
+        ({ svg, layers } = await this.processMulticolor(processedBuffer, settings, width, height));
         break;
       case 'lineart':
-        layers = await this.processLineart(image, settings);
+        ({ svg, layers } = await this.processLineart(processedBuffer, settings, width, height));
         break;
       default:
         throw new Error(`Unknown conversion mode: ${settings.mode}`);
     }
 
-    // Generate SVG
-    const svg = this.generateSVG(layers, settings, image.getWidth(), image.getHeight());
-
-    // Compute stats
-    const layerInfos: LayerInfo[] = layers.map(layer => ({
-      id: layer.id,
-      name: layer.name,
-      color: layer.color,
-      pathCount: layer.paths.length,
-      pointCount: countPoints(layer.paths),
-    }));
+    // Count paths and points for stats
+    const pathMatches = svg.match(/<path/g) || [];
+    const dMatches = svg.match(/d="([^"]*)"/g) || [];
+    let totalPoints = 0;
+    for (const d of dMatches) {
+      // Rough estimate: count command letters
+      const commands = d.match(/[MLHVCSQTAZmlhvcsqtaz]/g) || [];
+      totalPoints += commands.length;
+    }
 
     const stats = {
-      totalPaths: layers.reduce((sum, l) => sum + l.paths.length, 0),
-      totalPoints: layers.reduce((sum, l) => sum + countPoints(l.paths), 0),
+      totalPaths: pathMatches.length,
+      totalPoints,
       processingTimeMs: Date.now() - startTime,
       originalWidth,
       originalHeight,
@@ -97,111 +94,77 @@ export class Vectorizer {
       outputHeight: settings.targetHeight,
     };
 
-    return { svg, layers: layerInfos, stats };
+    return { svg, layers, stats };
   }
 
   /**
    * Process image in silhouette (single color) mode
    */
   private async processSilhouette(
-    image: Jimp,
-    settings: VectorizationSettings
-  ): Promise<Layer[]> {
-    // Convert to grayscale and apply threshold
-    const processed = image.clone().grayscale();
-
-    // Get pixel data for background detection
-    const width = processed.getWidth();
-    const height = processed.getHeight();
-    const pixels: RGBA[] = [];
-
-    processed.scan(0, 0, width, height, (x, y, idx) => {
-      pixels.push({
-        r: processed.bitmap.data[idx],
-        g: processed.bitmap.data[idx + 1],
-        b: processed.bitmap.data[idx + 2],
-        a: processed.bitmap.data[idx + 3],
-      });
-    });
-
-    // Handle background
-    if (settings.background === 'remove') {
-      const bgColor = findBackgroundColor(pixels, width, height);
-      if (bgColor) {
-        // Make background color transparent
-        processed.scan(0, 0, width, height, (x, y, idx) => {
-          const pixel: RGB = {
-            r: processed.bitmap.data[idx],
-            g: processed.bitmap.data[idx + 1],
-            b: processed.bitmap.data[idx + 2],
-          };
-          if (colorDistance(pixel, bgColor) < 30) {
-            processed.bitmap.data[idx + 3] = 0; // Make transparent
-          }
-        });
-      }
-    }
-
-    // Apply threshold
-    const threshold = settings.threshold ?? 128;
-    processed.scan(0, 0, width, height, (x, y, idx) => {
-      const gray = processed.bitmap.data[idx];
-      const alpha = processed.bitmap.data[idx + 3];
-      const value = alpha > 128 && gray < threshold ? 0 : 255;
-      processed.bitmap.data[idx] = value;
-      processed.bitmap.data[idx + 1] = value;
-      processed.bitmap.data[idx + 2] = value;
-    });
-
-    // Convert to buffer for potrace
-    const pngBuffer = await processed.getBufferAsync(Jimp.MIME_PNG);
+    imageBuffer: Buffer,
+    settings: VectorizationSettings,
+    width: number,
+    height: number
+  ): Promise<{ svg: string; layers: LayerInfo[] }> {
+    // Convert to grayscale
+    const grayscaleBuffer = await sharp(imageBuffer)
+      .grayscale()
+      .png()
+      .toBuffer();
 
     // Trace with potrace
-    const tolerance = this.detailToTolerance(settings.detail);
-    const svgString = await potraceTrace(pngBuffer, {
+    const threshold = settings.threshold ?? 128;
+    const svgString = await potraceTrace(grayscaleBuffer, {
       turdSize: Math.max(2, Math.floor((100 - settings.detail) / 10)),
-      optTolerance: tolerance,
+      optTolerance: this.detailToTolerance(settings.detail),
       threshold: threshold,
+      blackOnWhite: true,
     });
 
-    // Parse paths from SVG
-    const paths = this.parseSVGPaths(svgString , settings);
+    // Extract paths from potrace output and build our SVG
+    const paths = this.extractPaths(svgString);
+    const svg = this.buildSVG(paths, settings, width, height, '#000000');
 
-    return [{
+    const layers: LayerInfo[] = [{
       id: 'layer-0',
       name: 'Silhouette',
       color: '#000000',
-      paths,
+      pathCount: paths.length,
+      pointCount: this.countPathPoints(paths),
     }];
+
+    return { svg, layers };
   }
 
   /**
    * Process image in multi-color mode
    */
   private async processMulticolor(
-    image: Jimp,
-    settings: VectorizationSettings
-  ): Promise<Layer[]> {
-    const width = image.getWidth();
-    const height = image.getHeight();
+    imageBuffer: Buffer,
+    settings: VectorizationSettings,
+    width: number,
+    height: number
+  ): Promise<{ svg: string; layers: LayerInfo[] }> {
+    // Get raw pixel data
+    const { data, info } = await sharp(imageBuffer)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
 
-    // Extract pixels
     const pixels: RGBA[] = [];
-    image.scan(0, 0, width, height, (x, y, idx) => {
+    for (let i = 0; i < data.length; i += 4) {
       pixels.push({
-        r: image.bitmap.data[idx],
-        g: image.bitmap.data[idx + 1],
-        b: image.bitmap.data[idx + 2],
-        a: image.bitmap.data[idx + 3],
+        r: data[i],
+        g: data[i + 1],
+        b: data[i + 2],
+        a: data[i + 3],
       });
-    });
+    }
 
     // Handle background removal
-    let bgColorIndex = -1;
     if (settings.background === 'remove') {
-      const bgColor = findBackgroundColor(pixels, width, height);
+      const bgColor = findBackgroundColor(pixels, info.width, info.height);
       if (bgColor) {
-        // Mark background pixels as transparent
         pixels.forEach((pixel, i) => {
           if (colorDistance(pixel, bgColor) < 30) {
             pixels[i].a = 0;
@@ -212,9 +175,9 @@ export class Vectorizer {
 
     // Quantize colors
     const { palette, assignments } = kMeansQuantize(pixels, settings.colorLayers);
-
-    // Sort palette by luminance for consistent layer ordering
     const sortedPalette = sortColorsByLuminance(palette);
+
+    // Map old indices to new sorted indices
     const paletteMap = new Map<number, number>();
     palette.forEach((color, oldIndex) => {
       const newIndex = sortedPalette.findIndex(
@@ -223,57 +186,45 @@ export class Vectorizer {
       paletteMap.set(oldIndex, newIndex);
     });
 
-    // Create layers for each color
-    const layers: Layer[] = [];
+    // Process each color layer
+    const allLayerPaths: { paths: string[]; color: string; name: string }[] = [];
 
     for (let colorIndex = 0; colorIndex < sortedPalette.length; colorIndex++) {
       const color = sortedPalette[colorIndex];
 
-      // Skip if this is background color and we're removing it
-      if (settings.background === 'remove' && colorIndex === bgColorIndex) {
-        continue;
-      }
-
       // Create binary image for this color
-      const colorImage = new Jimp(width, height, 0xffffffff);
+      const binaryData = Buffer.alloc(info.width * info.height);
 
       assignments.forEach((assignment, i) => {
-        if (assignment === -1) return; // Transparent pixel
-
-        const mappedAssignment = paletteMap.get(assignment);
-        if (mappedAssignment === colorIndex) {
-          const x = i % width;
-          const y = Math.floor(i / width);
-          colorImage.setPixelColor(0x000000ff, x, y);
+        if (assignment === -1) {
+          binaryData[i] = 255; // Transparent -> white
+          return;
         }
+        const mappedAssignment = paletteMap.get(assignment);
+        binaryData[i] = mappedAssignment === colorIndex ? 0 : 255;
       });
 
-      // Trace this color layer
-      const pngBuffer = await colorImage.getBufferAsync(Jimp.MIME_PNG);
-      const tolerance = this.detailToTolerance(settings.detail);
+      // Create PNG from binary data
+      const binaryPng = await sharp(binaryData, {
+        raw: { width: info.width, height: info.height, channels: 1 }
+      }).png().toBuffer();
 
+      // Trace this color
       try {
-        const svgString = await potraceTrace(pngBuffer, {
+        const svgString = await potraceTrace(binaryPng, {
           turdSize: Math.max(2, Math.floor((100 - settings.detail) / 10)),
-          optTolerance: tolerance,
+          optTolerance: this.detailToTolerance(settings.detail),
           threshold: 128,
+          blackOnWhite: true,
         });
 
-        const paths = this.parseSVGPaths(svgString , settings);
+        const paths = this.extractPaths(svgString);
 
-        // Filter out small paths
-        const minArea = (width * height * settings.minAreaThreshold) / 100;
-        const filteredPaths = paths.filter(path => {
-          const area = calculatePolygonArea(path.points);
-          return area >= minArea;
-        });
-
-        if (filteredPaths.length > 0) {
-          layers.push({
-            id: `layer-${colorIndex}`,
-            name: `Color ${colorIndex + 1}`,
+        if (paths.length > 0) {
+          allLayerPaths.push({
+            paths,
             color: rgbToHex(color),
-            paths: filteredPaths,
+            name: `Color ${colorIndex + 1}`,
           });
         }
       } catch (error) {
@@ -281,120 +232,79 @@ export class Vectorizer {
       }
     }
 
-    return layers;
+    // Build combined SVG with all layers
+    const svg = this.buildMultiLayerSVG(allLayerPaths, settings, width, height);
+
+    const layers: LayerInfo[] = allLayerPaths.map((layer, index) => ({
+      id: `layer-${index}`,
+      name: layer.name,
+      color: layer.color,
+      pathCount: layer.paths.length,
+      pointCount: this.countPathPoints(layer.paths),
+    }));
+
+    return { svg, layers };
   }
 
   /**
    * Process image in line art mode
    */
   private async processLineart(
-    image: Jimp,
-    settings: VectorizationSettings
-  ): Promise<Layer[]> {
-    const width = image.getWidth();
-    const height = image.getHeight();
-
-    // Convert to grayscale
-    const processed = image.clone().grayscale();
-
-    // Apply edge detection (Sobel-like)
-    const edgeImage = new Jimp(width, height, 0xffffffff);
-
-    for (let y = 1; y < height - 1; y++) {
-      for (let x = 1; x < width - 1; x++) {
-        // Sobel kernels
-        const getGray = (px: number, py: number): number => {
-          const idx = (py * width + px) * 4;
-          return processed.bitmap.data[idx];
-        };
-
-        // Horizontal gradient
-        const gx =
-          -getGray(x - 1, y - 1) - 2 * getGray(x - 1, y) - getGray(x - 1, y + 1) +
-          getGray(x + 1, y - 1) + 2 * getGray(x + 1, y) + getGray(x + 1, y + 1);
-
-        // Vertical gradient
-        const gy =
-          -getGray(x - 1, y - 1) - 2 * getGray(x, y - 1) - getGray(x + 1, y - 1) +
-          getGray(x - 1, y + 1) + 2 * getGray(x, y + 1) + getGray(x + 1, y + 1);
-
-        // Gradient magnitude
-        const magnitude = Math.sqrt(gx * gx + gy * gy);
-
-        // Threshold based on detail setting
-        const edgeThreshold = 50 + (100 - settings.detail) * 1.5;
-        const value = magnitude > edgeThreshold ? 0 : 255;
-
-        edgeImage.setPixelColor(
-          Jimp.rgbaToInt(value, value, value, 255),
-          x,
-          y
-        );
-      }
-    }
+    imageBuffer: Buffer,
+    settings: VectorizationSettings,
+    width: number,
+    height: number
+  ): Promise<{ svg: string; layers: LayerInfo[] }> {
+    // Use sharp's edge detection via convolution (Sobel-like)
+    // First convert to grayscale, then use Canny-style edge detection
+    const edgeBuffer = await sharp(imageBuffer)
+      .grayscale()
+      .convolve({
+        width: 3,
+        height: 3,
+        kernel: [-1, -1, -1, -1, 8, -1, -1, -1, -1], // Laplacian edge detection
+      })
+      .negate() // Invert so edges are black on white
+      .normalize() // Enhance contrast
+      .png()
+      .toBuffer();
 
     // Trace edges
-    const pngBuffer = await edgeImage.getBufferAsync(Jimp.MIME_PNG);
-    const tolerance = this.detailToTolerance(settings.detail);
-
-    const svgString = await potraceTrace(pngBuffer, {
+    const svgString = await potraceTrace(edgeBuffer, {
       turdSize: Math.max(2, Math.floor((100 - settings.detail) / 5)),
-      optTolerance: tolerance,
-      threshold: 128,
+      optTolerance: this.detailToTolerance(settings.detail),
+      threshold: 128 + Math.floor((50 - settings.detail / 2)),
+      blackOnWhite: true,
     });
 
-    const paths = this.parseSVGPaths(svgString , settings);
+    const paths = this.extractPaths(svgString);
+    const svg = this.buildSVG(paths, settings, width, height, '#000000');
 
-    return [{
+    const layers: LayerInfo[] = [{
       id: 'layer-0',
       name: 'Line Art',
       color: '#000000',
-      paths,
+      pathCount: paths.length,
+      pointCount: this.countPathPoints(paths),
     }];
+
+    return { svg, layers };
   }
 
   /**
-   * Convert detail slider value to potrace tolerance
+   * Extract path d attributes from potrace SVG output
    */
-  private detailToTolerance(detail: number): number {
-    // Detail 0 = high tolerance (fewer points), Detail 100 = low tolerance (more points)
-    return 2 - (detail / 100) * 1.8;
-  }
+  private extractPaths(svgString: string): string[] {
+    const paths: string[] = [];
 
-  /**
-   * Parse SVG path elements from potrace output
-   */
-  private parseSVGPaths(svgString: string, settings: VectorizationSettings): PathData[] {
-    const paths: PathData[] = [];
-
-    // Extract path d attributes
-    const pathRegex = /<path[^>]*d="([^"]*)"[^>]*>/g;
+    // Match path elements and extract d attribute
+    const pathRegex = /<path[^>]*\sd="([^"]+)"[^>]*\/?>/g;
     let match;
 
     while ((match = pathRegex.exec(svgString)) !== null) {
       const d = match[1];
-      const points = this.parsePathD(d);
-
-      if (points.length > 2) {
-        // Apply smoothing
-        const smoothIterations = Math.floor(settings.smoothing / 25);
-        let processedPoints = points;
-
-        if (smoothIterations > 0) {
-          processedPoints = smoothPath(points, smoothIterations);
-        }
-
-        // Apply simplification based on detail
-        const tolerance = (100 - settings.detail) / 10;
-        if (tolerance > 0) {
-          processedPoints = simplifyPath(processedPoints, tolerance);
-        }
-
-        paths.push({
-          points: processedPoints,
-          closed: d.toUpperCase().includes('Z'),
-          fill: '#000000',
-        });
+      if (d && d.trim()) {
+        paths.push(d);
       }
     }
 
@@ -402,170 +312,76 @@ export class Vectorizer {
   }
 
   /**
-   * Parse SVG path d attribute to points
+   * Build final SVG with proper dimensions and structure
    */
-  private parsePathD(d: string): Point[] {
-    const points: Point[] = [];
-    let currentX = 0;
-    let currentY = 0;
+  private buildSVG(
+    paths: string[],
+    settings: VectorizationSettings,
+    sourceWidth: number,
+    sourceHeight: number,
+    fillColor: string
+  ): string {
+    const { outputWidth, outputHeight } = this.calculateOutputDimensions(
+      sourceWidth, sourceHeight, settings
+    );
 
-    // Tokenize path data
-    const commands = d.match(/[MmLlHhVvCcSsQqTtAaZz][^MmLlHhVvCcSsQqTtAaZz]*/g) || [];
+    const unit = settings.unit;
+    const lines: string[] = [];
 
-    for (const cmd of commands) {
-      const type = cmd[0];
-      const args = cmd
-        .slice(1)
-        .trim()
-        .split(/[\s,]+/)
-        .filter(s => s)
-        .map(Number);
+    lines.push(`<?xml version="1.0" encoding="UTF-8"?>`);
+    lines.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${outputWidth.toFixed(4)}${unit}" height="${outputHeight.toFixed(4)}${unit}" viewBox="0 0 ${sourceWidth} ${sourceHeight}">`);
+    lines.push(`  <g id="layer-0" data-name="Silhouette">`);
 
-      switch (type) {
-        case 'M': // Absolute moveto
-          currentX = args[0] || 0;
-          currentY = args[1] || 0;
-          points.push({ x: currentX, y: currentY });
-          // Additional coordinate pairs are lineto
-          for (let i = 2; i < args.length; i += 2) {
-            currentX = args[i];
-            currentY = args[i + 1];
-            points.push({ x: currentX, y: currentY });
-          }
-          break;
-
-        case 'm': // Relative moveto
-          currentX += args[0] || 0;
-          currentY += args[1] || 0;
-          points.push({ x: currentX, y: currentY });
-          for (let i = 2; i < args.length; i += 2) {
-            currentX += args[i];
-            currentY += args[i + 1];
-            points.push({ x: currentX, y: currentY });
-          }
-          break;
-
-        case 'L': // Absolute lineto
-          for (let i = 0; i < args.length; i += 2) {
-            currentX = args[i];
-            currentY = args[i + 1];
-            points.push({ x: currentX, y: currentY });
-          }
-          break;
-
-        case 'l': // Relative lineto
-          for (let i = 0; i < args.length; i += 2) {
-            currentX += args[i];
-            currentY += args[i + 1];
-            points.push({ x: currentX, y: currentY });
-          }
-          break;
-
-        case 'H': // Absolute horizontal lineto
-          for (const arg of args) {
-            currentX = arg;
-            points.push({ x: currentX, y: currentY });
-          }
-          break;
-
-        case 'h': // Relative horizontal lineto
-          for (const arg of args) {
-            currentX += arg;
-            points.push({ x: currentX, y: currentY });
-          }
-          break;
-
-        case 'V': // Absolute vertical lineto
-          for (const arg of args) {
-            currentY = arg;
-            points.push({ x: currentX, y: currentY });
-          }
-          break;
-
-        case 'v': // Relative vertical lineto
-          for (const arg of args) {
-            currentY += arg;
-            points.push({ x: currentX, y: currentY });
-          }
-          break;
-
-        case 'C': // Absolute cubic bezier
-          for (let i = 0; i < args.length; i += 6) {
-            // Sample points along the curve
-            const x1 = args[i], y1 = args[i + 1];
-            const x2 = args[i + 2], y2 = args[i + 3];
-            const x = args[i + 4], y = args[i + 5];
-
-            for (let t = 0.25; t <= 1; t += 0.25) {
-              const pt = this.cubicBezierPoint(
-                currentX, currentY, x1, y1, x2, y2, x, y, t
-              );
-              points.push(pt);
-            }
-            currentX = x;
-            currentY = y;
-          }
-          break;
-
-        case 'c': // Relative cubic bezier
-          for (let i = 0; i < args.length; i += 6) {
-            const x1 = currentX + args[i], y1 = currentY + args[i + 1];
-            const x2 = currentX + args[i + 2], y2 = currentY + args[i + 3];
-            const x = currentX + args[i + 4], y = currentY + args[i + 5];
-
-            for (let t = 0.25; t <= 1; t += 0.25) {
-              const pt = this.cubicBezierPoint(
-                currentX, currentY, x1, y1, x2, y2, x, y, t
-              );
-              points.push(pt);
-            }
-            currentX = x;
-            currentY = y;
-          }
-          break;
-
-        case 'Z':
-        case 'z':
-          // Close path - don't need to add point
-          break;
-      }
+    for (const pathD of paths) {
+      lines.push(`    <path d="${pathD}" fill="${fillColor}"/>`);
     }
 
-    return points;
+    lines.push(`  </g>`);
+    lines.push(`</svg>`);
+
+    return lines.join('\n');
   }
 
   /**
-   * Calculate point on cubic bezier curve at parameter t
+   * Build multi-layer SVG
    */
-  private cubicBezierPoint(
-    x0: number, y0: number,
-    x1: number, y1: number,
-    x2: number, y2: number,
-    x3: number, y3: number,
-    t: number
-  ): Point {
-    const mt = 1 - t;
-    const mt2 = mt * mt;
-    const mt3 = mt2 * mt;
-    const t2 = t * t;
-    const t3 = t2 * t;
-
-    return {
-      x: mt3 * x0 + 3 * mt2 * t * x1 + 3 * mt * t2 * x2 + t3 * x3,
-      y: mt3 * y0 + 3 * mt2 * t * y1 + 3 * mt * t2 * y2 + t3 * y3,
-    };
-  }
-
-  /**
-   * Generate final SVG output
-   */
-  private generateSVG(
-    layers: Layer[],
+  private buildMultiLayerSVG(
+    layerData: { paths: string[]; color: string; name: string }[],
     settings: VectorizationSettings,
     sourceWidth: number,
     sourceHeight: number
   ): string {
-    // Calculate dimensions preserving aspect ratio
+    const { outputWidth, outputHeight } = this.calculateOutputDimensions(
+      sourceWidth, sourceHeight, settings
+    );
+
+    const unit = settings.unit;
+    const lines: string[] = [];
+
+    lines.push(`<?xml version="1.0" encoding="UTF-8"?>`);
+    lines.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${outputWidth.toFixed(4)}${unit}" height="${outputHeight.toFixed(4)}${unit}" viewBox="0 0 ${sourceWidth} ${sourceHeight}">`);
+
+    layerData.forEach((layer, index) => {
+      lines.push(`  <g id="layer-${index}" data-name="${layer.name}">`);
+      for (const pathD of layer.paths) {
+        lines.push(`    <path d="${pathD}" fill="${layer.color}"/>`);
+      }
+      lines.push(`  </g>`);
+    });
+
+    lines.push(`</svg>`);
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Calculate output dimensions maintaining aspect ratio
+   */
+  private calculateOutputDimensions(
+    sourceWidth: number,
+    sourceHeight: number,
+    settings: VectorizationSettings
+  ): { outputWidth: number; outputHeight: number } {
     const aspectRatio = sourceWidth / sourceHeight;
     let outputWidth = settings.targetWidth;
     let outputHeight = settings.targetHeight;
@@ -577,64 +393,28 @@ export class Vectorizer {
       outputHeight = outputWidth / aspectRatio;
     }
 
-    const unit = settings.unit;
-    const viewBoxWidth = sourceWidth;
-    const viewBoxHeight = sourceHeight;
-
-    // Build SVG
-    const svgParts: string[] = [];
-
-    svgParts.push(`<?xml version="1.0" encoding="UTF-8"?>`);
-    svgParts.push(
-      `<svg xmlns="http://www.w3.org/2000/svg" ` +
-      `width="${outputWidth.toFixed(4)}${unit}" ` +
-      `height="${outputHeight.toFixed(4)}${unit}" ` +
-      `viewBox="0 0 ${viewBoxWidth} ${viewBoxHeight}">`
-    );
-
-    // Add layers as groups
-    for (const layer of layers) {
-      svgParts.push(`  <g id="${layer.id}" data-name="${layer.name}">`);
-
-      for (const path of layer.paths) {
-        const d = this.pointsToPathD(path.points, path.closed);
-
-        if (path.stroke) {
-          svgParts.push(
-            `    <path d="${d}" fill="none" stroke="${layer.color}" ` +
-            `stroke-width="${path.strokeWidth || 1}"/>`
-          );
-        } else {
-          svgParts.push(`    <path d="${d}" fill="${layer.color}"/>`);
-        }
-      }
-
-      svgParts.push(`  </g>`);
-    }
-
-    svgParts.push(`</svg>`);
-
-    return svgParts.join('\n');
+    return { outputWidth, outputHeight };
   }
 
   /**
-   * Convert points to SVG path data
+   * Convert detail slider value to potrace tolerance
    */
-  private pointsToPathD(points: Point[], closed: boolean): string {
-    if (points.length === 0) return '';
+  private detailToTolerance(detail: number): number {
+    // Detail 0 = high tolerance (fewer points), Detail 100 = low tolerance (more points)
+    return 2 - (detail / 100) * 1.8;
+  }
 
-    const parts: string[] = [];
-    parts.push(`M${points[0].x.toFixed(2)},${points[0].y.toFixed(2)}`);
-
-    for (let i = 1; i < points.length; i++) {
-      parts.push(`L${points[i].x.toFixed(2)},${points[i].y.toFixed(2)}`);
+  /**
+   * Count approximate points in path strings
+   */
+  private countPathPoints(paths: string[]): number {
+    let count = 0;
+    for (const path of paths) {
+      // Count path commands as approximate point count
+      const commands = path.match(/[MLHVCSQTAZmlhvcsqtaz]/g) || [];
+      count += commands.length;
     }
-
-    if (closed) {
-      parts.push('Z');
-    }
-
-    return parts.join('');
+    return count;
   }
 }
 
