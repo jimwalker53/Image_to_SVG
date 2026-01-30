@@ -121,9 +121,14 @@ export class Vectorizer {
       blackOnWhite: true,
     });
 
-    // Extract paths from potrace output and build our SVG
-    const paths = this.extractPaths(svgString);
-    const svg = this.buildSVG(paths, settings, width, height, '#000000');
+    // Extract paths and viewBox from potrace output
+    const { paths, viewBox } = this.extractPathsAndViewBox(svgString);
+
+    // Use potrace's viewBox if available, otherwise fall back to image dimensions
+    const vbWidth = viewBox.width || width;
+    const vbHeight = viewBox.height || height;
+
+    const svg = this.buildSVG(paths, settings, vbWidth, vbHeight, '#000000', 'Silhouette');
 
     const layers: LayerInfo[] = [{
       id: 'layer-0',
@@ -188,6 +193,7 @@ export class Vectorizer {
 
     // Process each color layer
     const allLayerPaths: { paths: string[]; color: string; name: string }[] = [];
+    let finalViewBox = { width: width, height: height };
 
     for (let colorIndex = 0; colorIndex < sortedPalette.length; colorIndex++) {
       const color = sortedPalette[colorIndex];
@@ -218,7 +224,12 @@ export class Vectorizer {
           blackOnWhite: true,
         });
 
-        const paths = this.extractPaths(svgString);
+        const { paths, viewBox } = this.extractPathsAndViewBox(svgString);
+
+        // Use first valid viewBox for all layers
+        if (viewBox.width && viewBox.height && finalViewBox.width === width) {
+          finalViewBox = viewBox;
+        }
 
         if (paths.length > 0) {
           allLayerPaths.push({
@@ -232,8 +243,8 @@ export class Vectorizer {
       }
     }
 
-    // Build combined SVG with all layers
-    const svg = this.buildMultiLayerSVG(allLayerPaths, settings, width, height);
+    // Build combined SVG with all layers using the extracted viewBox
+    const svg = this.buildMultiLayerSVG(allLayerPaths, settings, finalViewBox.width, finalViewBox.height);
 
     const layers: LayerInfo[] = allLayerPaths.map((layer, index) => ({
       id: `layer-${index}`,
@@ -277,8 +288,14 @@ export class Vectorizer {
       blackOnWhite: true,
     });
 
-    const paths = this.extractPaths(svgString);
-    const svg = this.buildSVG(paths, settings, width, height, '#000000');
+    // Extract paths and viewBox from potrace output
+    const { paths, viewBox } = this.extractPathsAndViewBox(svgString);
+
+    // Use potrace's viewBox if available, otherwise fall back to image dimensions
+    const vbWidth = viewBox.width || width;
+    const vbHeight = viewBox.height || height;
+
+    const svg = this.buildSVG(paths, settings, vbWidth, vbHeight, '#000000', 'Line Art');
 
     const layers: LayerInfo[] = [{
       id: 'layer-0',
@@ -292,10 +309,32 @@ export class Vectorizer {
   }
 
   /**
-   * Extract path d attributes from potrace SVG output
+   * Extract path d attributes and viewBox from potrace SVG output
    */
-  private extractPaths(svgString: string): string[] {
+  private extractPathsAndViewBox(svgString: string): { paths: string[]; viewBox: { width: number; height: number } } {
     const paths: string[] = [];
+
+    // Extract viewBox or width/height from potrace SVG
+    let viewBoxWidth = 0;
+    let viewBoxHeight = 0;
+
+    // Try to match viewBox attribute
+    const viewBoxMatch = svgString.match(/viewBox="([^"]+)"/);
+    if (viewBoxMatch) {
+      const parts = viewBoxMatch[1].split(/\s+/).map(Number);
+      if (parts.length >= 4) {
+        viewBoxWidth = parts[2];
+        viewBoxHeight = parts[3];
+      }
+    }
+
+    // Fallback to width/height attributes if no viewBox
+    if (!viewBoxWidth || !viewBoxHeight) {
+      const widthMatch = svgString.match(/width="(\d+(?:\.\d+)?)(?:pt)?"/);
+      const heightMatch = svgString.match(/height="(\d+(?:\.\d+)?)(?:pt)?"/);
+      if (widthMatch) viewBoxWidth = parseFloat(widthMatch[1]);
+      if (heightMatch) viewBoxHeight = parseFloat(heightMatch[1]);
+    }
 
     // Match path elements and extract d attribute
     const pathRegex = /<path[^>]*\sd="([^"]+)"[^>]*\/?>/g;
@@ -308,7 +347,7 @@ export class Vectorizer {
       }
     }
 
-    return paths;
+    return { paths, viewBox: { width: viewBoxWidth, height: viewBoxHeight } };
   }
 
   /**
@@ -317,20 +356,21 @@ export class Vectorizer {
   private buildSVG(
     paths: string[],
     settings: VectorizationSettings,
-    sourceWidth: number,
-    sourceHeight: number,
-    fillColor: string
+    viewBoxWidth: number,
+    viewBoxHeight: number,
+    fillColor: string,
+    layerName: string = 'Silhouette'
   ): string {
     const { outputWidth, outputHeight } = this.calculateOutputDimensions(
-      sourceWidth, sourceHeight, settings
+      viewBoxWidth, viewBoxHeight, settings
     );
 
     const unit = settings.unit;
     const lines: string[] = [];
 
     lines.push(`<?xml version="1.0" encoding="UTF-8"?>`);
-    lines.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${outputWidth.toFixed(4)}${unit}" height="${outputHeight.toFixed(4)}${unit}" viewBox="0 0 ${sourceWidth} ${sourceHeight}">`);
-    lines.push(`  <g id="layer-0" data-name="Silhouette">`);
+    lines.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${outputWidth.toFixed(4)}${unit}" height="${outputHeight.toFixed(4)}${unit}" viewBox="0 0 ${viewBoxWidth} ${viewBoxHeight}">`);
+    lines.push(`  <g id="layer-0" data-name="${layerName}">`);
 
     for (const pathD of paths) {
       lines.push(`    <path d="${pathD}" fill="${fillColor}"/>`);
@@ -348,18 +388,18 @@ export class Vectorizer {
   private buildMultiLayerSVG(
     layerData: { paths: string[]; color: string; name: string }[],
     settings: VectorizationSettings,
-    sourceWidth: number,
-    sourceHeight: number
+    viewBoxWidth: number,
+    viewBoxHeight: number
   ): string {
     const { outputWidth, outputHeight } = this.calculateOutputDimensions(
-      sourceWidth, sourceHeight, settings
+      viewBoxWidth, viewBoxHeight, settings
     );
 
     const unit = settings.unit;
     const lines: string[] = [];
 
     lines.push(`<?xml version="1.0" encoding="UTF-8"?>`);
-    lines.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${outputWidth.toFixed(4)}${unit}" height="${outputHeight.toFixed(4)}${unit}" viewBox="0 0 ${sourceWidth} ${sourceHeight}">`);
+    lines.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${outputWidth.toFixed(4)}${unit}" height="${outputHeight.toFixed(4)}${unit}" viewBox="0 0 ${viewBoxWidth} ${viewBoxHeight}">`);
 
     layerData.forEach((layer, index) => {
       lines.push(`  <g id="layer-${index}" data-name="${layer.name}">`);
