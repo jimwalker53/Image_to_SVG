@@ -14,6 +14,11 @@ export interface VectorizationSettings {
   targetHeight: number;
   unit: OutputUnit;
   threshold: number;
+  // Cleanup options
+  removeEdgeRegions: boolean;
+  minRegionSize: number;
+  erosionLevel: number;
+  invert: boolean;
 }
 
 export interface LayerInfo {
@@ -79,4 +84,9 @@ export const DEFAULT_SETTINGS: VectorizationSettings = {
   targetHeight: 6,
   unit: 'inches',
   threshold: 128,
+  // Cleanup options - off by default
+  removeEdgeRegions: false,
+  minRegionSize: 0,
+  erosionLevel: 0,
+  invert: false,
 };

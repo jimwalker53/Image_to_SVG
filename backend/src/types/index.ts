@@ -13,6 +13,11 @@ export interface VectorizationSettings {
   targetHeight: number;
   unit: OutputUnit;
   threshold?: number; // For silhouette mode (0-255)
+  // Cleanup options
+  removeEdgeRegions: boolean; // Remove regions touching image border (ground/shadows)
+  minRegionSize: number; // Minimum region size as percentage (0-10)
+  erosionLevel: number; // Morphological erosion to clean thin connections (0-5)
+  invert: boolean; // Invert colors - cut white areas instead of black
 }
 
 export interface ConversionRequest {
@@ -76,4 +81,9 @@ export const DEFAULT_SETTINGS: VectorizationSettings = {
   targetHeight: 6,
   unit: 'inches',
   threshold: 128,
+  // Cleanup options - off by default
+  removeEdgeRegions: false,
+  minRegionSize: 0,
+  erosionLevel: 0,
+  invert: false,
 };

@@ -229,6 +229,82 @@ export function ControlsPanel({ settings, onSettingsChange, disabled }: Controls
           ))}
         </div>
       </div>
+
+      {/* Cleanup Options (Silhouette mode only) */}
+      {settings.mode === 'silhouette' && (
+        <div className="space-y-4 border-t border-gray-200 pt-4">
+          <h3 className="text-sm font-semibold text-gray-700">Cleanup Options</h3>
+          <p className="text-xs text-gray-500">Reduce weeding by removing unwanted areas</p>
+
+          {/* Invert Toggle */}
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={settings.invert}
+              onChange={(e) => updateSetting('invert', e.target.checked)}
+              disabled={disabled}
+              className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+            />
+            <div>
+              <span className="text-sm font-medium text-gray-700">Invert Colors</span>
+              <p className="text-xs text-gray-500">Cut white areas instead of black</p>
+            </div>
+          </label>
+
+          {/* Remove Edge Regions Toggle */}
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={settings.removeEdgeRegions}
+              onChange={(e) => updateSetting('removeEdgeRegions', e.target.checked)}
+              disabled={disabled}
+              className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+            />
+            <div>
+              <span className="text-sm font-medium text-gray-700">Remove Edge Regions</span>
+              <p className="text-xs text-gray-500">Remove ground/shadows touching borders</p>
+            </div>
+          </label>
+
+          {/* Minimum Region Size */}
+          <div className="space-y-2">
+            <div className="flex justify-between">
+              <label className="text-sm font-medium text-gray-700">Min Region Size</label>
+              <span className="text-sm text-gray-500">{settings.minRegionSize}%</span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="5"
+              step="0.1"
+              value={settings.minRegionSize}
+              onChange={(e) => updateSetting('minRegionSize', parseFloat(e.target.value))}
+              disabled={disabled}
+              className="w-full"
+            />
+            <p className="text-xs text-gray-400">Remove small isolated specks</p>
+          </div>
+
+          {/* Erosion Level */}
+          <div className="space-y-2">
+            <div className="flex justify-between">
+              <label className="text-sm font-medium text-gray-700">Erosion Level</label>
+              <span className="text-sm text-gray-500">{settings.erosionLevel}</span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="5"
+              step="1"
+              value={settings.erosionLevel}
+              onChange={(e) => updateSetting('erosionLevel', parseInt(e.target.value))}
+              disabled={disabled}
+              className="w-full"
+            />
+            <p className="text-xs text-gray-400">Shrink regions to remove thin connections</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
