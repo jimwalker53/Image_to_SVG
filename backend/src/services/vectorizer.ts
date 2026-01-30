@@ -28,6 +28,205 @@ function potraceTrace(file: Buffer, options: PotraceOptions): Promise<string> {
 // Maximum image dimension for processing
 const MAX_DIMENSION = 4000;
 
+/**
+ * Apply cleanup options to a binary (black/white) image buffer
+ * Returns processed buffer with cleanup applied
+ */
+async function applyCleanupOptions(
+  imageBuffer: Buffer,
+  settings: VectorizationSettings,
+  width: number,
+  height: number
+): Promise<Buffer> {
+  // Get raw pixel data
+  const { data } = await sharp(imageBuffer)
+    .grayscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  // Convert to mutable array
+  let pixels = new Uint8Array(data.buffer, data.byteOffset, data.length);
+
+  // Apply threshold first to get binary image
+  const threshold = settings.threshold ?? 128;
+  const binaryPixels = new Uint8Array(pixels.length);
+  for (let i = 0; i < pixels.length; i++) {
+    binaryPixels[i] = pixels[i] < threshold ? 0 : 255;
+  }
+  pixels = binaryPixels;
+
+  // Apply invert if requested (swap black and white)
+  if (settings.invert) {
+    for (let i = 0; i < pixels.length; i++) {
+      pixels[i] = pixels[i] === 0 ? 255 : 0;
+    }
+  }
+
+  // Apply erosion if requested (shrinks black regions)
+  if (settings.erosionLevel > 0) {
+    pixels = applyErosion(pixels, width, height, settings.erosionLevel);
+  }
+
+  // Remove edge-connected regions if requested
+  if (settings.removeEdgeRegions) {
+    pixels = removeEdgeConnectedRegions(pixels, width, height);
+  }
+
+  // Remove small regions based on minRegionSize
+  if (settings.minRegionSize > 0) {
+    pixels = removeSmallRegions(pixels, width, height, settings.minRegionSize);
+  }
+
+  // Convert back to PNG buffer
+  return sharp(Buffer.from(pixels.buffer), {
+    raw: { width, height, channels: 1 }
+  }).png().toBuffer();
+}
+
+/**
+ * Apply morphological erosion to shrink black regions
+ * This removes thin connecting areas between regions
+ */
+function applyErosion(pixels: Uint8Array, width: number, height: number, iterations: number): Uint8Array {
+  let current = new Uint8Array(pixels);
+
+  for (let iter = 0; iter < iterations; iter++) {
+    const next = new Uint8Array(current.length);
+    next.fill(255); // Start with white
+
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        const idx = y * width + x;
+
+        // Only keep black pixel if ALL neighbors are also black (3x3 kernel)
+        let allBlack = true;
+        for (let dy = -1; dy <= 1 && allBlack; dy++) {
+          for (let dx = -1; dx <= 1 && allBlack; dx++) {
+            const nIdx = (y + dy) * width + (x + dx);
+            if (current[nIdx] !== 0) {
+              allBlack = false;
+            }
+          }
+        }
+
+        if (allBlack) {
+          next[idx] = 0;
+        }
+      }
+    }
+
+    current = next;
+  }
+
+  return current;
+}
+
+/**
+ * Remove black regions that are connected to the image border
+ * Uses flood fill from all edge pixels
+ */
+function removeEdgeConnectedRegions(pixels: Uint8Array, width: number, height: number): Uint8Array {
+  const result = new Uint8Array(pixels);
+
+  // Track visited pixels
+  const visited = new Uint8Array(pixels.length);
+
+  // Flood fill function
+  const floodFill = (startX: number, startY: number) => {
+    const stack: [number, number][] = [[startX, startY]];
+
+    while (stack.length > 0) {
+      const [x, y] = stack.pop()!;
+      const idx = y * width + x;
+
+      if (x < 0 || x >= width || y < 0 || y >= height) continue;
+      if (visited[idx]) continue;
+      if (result[idx] !== 0) continue; // Only fill black pixels
+
+      visited[idx] = 1;
+      result[idx] = 255; // Change to white
+
+      // Add neighbors (4-connected)
+      stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+    }
+  };
+
+  // Start flood fill from all edge pixels that are black
+  // Top and bottom edges
+  for (let x = 0; x < width; x++) {
+    if (result[x] === 0) floodFill(x, 0);
+    if (result[(height - 1) * width + x] === 0) floodFill(x, height - 1);
+  }
+
+  // Left and right edges
+  for (let y = 0; y < height; y++) {
+    if (result[y * width] === 0) floodFill(0, y);
+    if (result[y * width + width - 1] === 0) floodFill(width - 1, y);
+  }
+
+  return result;
+}
+
+/**
+ * Remove small isolated regions below a certain size threshold
+ * Uses connected component labeling
+ */
+function removeSmallRegions(pixels: Uint8Array, width: number, height: number, minSizePercent: number): Uint8Array {
+  const result = new Uint8Array(pixels);
+  const totalPixels = width * height;
+  const minPixels = Math.floor(totalPixels * minSizePercent / 100);
+
+  // Label connected components
+  const labels = new Int32Array(pixels.length);
+  let currentLabel = 0;
+  const labelSizes = new Map<number, number>();
+
+  const floodFillLabel = (startX: number, startY: number, label: number): number => {
+    const stack: [number, number][] = [[startX, startY]];
+    let size = 0;
+
+    while (stack.length > 0) {
+      const [x, y] = stack.pop()!;
+      const idx = y * width + x;
+
+      if (x < 0 || x >= width || y < 0 || y >= height) continue;
+      if (labels[idx] !== 0) continue;
+      if (result[idx] !== 0) continue; // Only label black pixels
+
+      labels[idx] = label;
+      size++;
+
+      stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+    }
+
+    return size;
+  };
+
+  // Find and label all black regions
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      if (result[idx] === 0 && labels[idx] === 0) {
+        currentLabel++;
+        const size = floodFillLabel(x, y, currentLabel);
+        labelSizes.set(currentLabel, size);
+      }
+    }
+  }
+
+  // Remove regions smaller than threshold
+  for (let i = 0; i < result.length; i++) {
+    if (labels[i] !== 0) {
+      const size = labelSizes.get(labels[i]) || 0;
+      if (size < minPixels) {
+        result[i] = 255; // Change to white
+      }
+    }
+  }
+
+  return result;
+}
+
 export class Vectorizer {
   /**
    * Main conversion entry point
@@ -106,15 +305,29 @@ export class Vectorizer {
     width: number,
     height: number
   ): Promise<{ svg: string; layers: LayerInfo[] }> {
-    // Convert to grayscale
-    const grayscaleBuffer = await sharp(imageBuffer)
-      .grayscale()
-      .png()
-      .toBuffer();
+    // Check if any cleanup options are enabled
+    const hasCleanupOptions = settings.invert ||
+                              settings.erosionLevel > 0 ||
+                              settings.removeEdgeRegions ||
+                              settings.minRegionSize > 0;
+
+    let processedBuffer: Buffer;
+
+    if (hasCleanupOptions) {
+      // Apply cleanup options (includes threshold, invert, erosion, edge removal, small region removal)
+      processedBuffer = await applyCleanupOptions(imageBuffer, settings, width, height);
+    } else {
+      // Simple grayscale conversion
+      processedBuffer = await sharp(imageBuffer)
+        .grayscale()
+        .png()
+        .toBuffer();
+    }
 
     // Trace with potrace
-    const threshold = settings.threshold ?? 128;
-    const svgString = await potraceTrace(grayscaleBuffer, {
+    // If we already applied cleanup, use threshold 128 since image is already binary
+    const threshold = hasCleanupOptions ? 128 : (settings.threshold ?? 128);
+    const svgString = await potraceTrace(processedBuffer, {
       turdSize: Math.max(2, Math.floor((100 - settings.detail) / 10)),
       optTolerance: this.detailToTolerance(settings.detail),
       threshold: threshold,
