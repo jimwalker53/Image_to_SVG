@@ -371,6 +371,7 @@ export class Vectorizer {
     const svgString = await potraceTrace(processedBuffer, {
       turdSize: Math.max(2, Math.floor((100 - settings.detail) / 10)),
       optTolerance: this.detailToTolerance(settings.detail),
+      alphaMax: this.smoothingToAlphaMax(settings.smoothing),
       threshold: threshold,
       blackOnWhite: true,
     });
@@ -485,6 +486,7 @@ export class Vectorizer {
         const svgString = await potraceTrace(processedBinaryPng, {
           turdSize: Math.max(2, Math.floor((100 - settings.detail) / 10)),
           optTolerance: this.detailToTolerance(settings.detail),
+          alphaMax: this.smoothingToAlphaMax(settings.smoothing),
           threshold: 128,
           blackOnWhite: true,
         });
@@ -610,6 +612,7 @@ export class Vectorizer {
     const svgString = await potraceTrace(processedBuffer, {
       turdSize: Math.max(2, Math.floor((100 - settings.detail) / 5)),
       optTolerance: this.detailToTolerance(settings.detail),
+      alphaMax: this.smoothingToAlphaMax(settings.smoothing),
       threshold: 128,
       blackOnWhite: true,
     });
@@ -768,6 +771,16 @@ export class Vectorizer {
   private detailToTolerance(detail: number): number {
     // Detail 0 = high tolerance (fewer points), Detail 100 = low tolerance (more points)
     return 2 - (detail / 100) * 1.8;
+  }
+
+  /**
+   * Convert smoothing slider value to potrace alphaMax
+   * alphaMax controls corner threshold: 0 = all corners sharp, higher = more curves
+   * Default potrace value is 1.0, range 0-1.334 recommended
+   */
+  private smoothingToAlphaMax(smoothing: number): number {
+    // Smoothing 0 = sharp corners (alphaMax 0), Smoothing 100 = max curves (alphaMax 1.334)
+    return (smoothing / 100) * 1.334;
   }
 
   /**

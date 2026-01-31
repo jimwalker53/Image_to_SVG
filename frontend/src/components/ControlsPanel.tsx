@@ -57,7 +57,74 @@ export function ControlsPanel({ settings, onSettingsChange, disabled }: Controls
     onSettingsChange({ ...settings, [key]: value });
   };
 
-  // Apply minimal weeding preset
+  // Preset definitions
+  const PRESETS = {
+    singleColorDecal: {
+      name: 'Single Color Decal',
+      description: 'Simple vinyl decal with clean edges',
+      settings: {
+        mode: 'silhouette' as const,
+        detail: 40,
+        smoothing: 70,
+        threshold: 128,
+        removeEdgeRegions: true,
+        minRegionSize: 1,
+        erosionLevel: 1,
+        invert: false,
+      },
+    },
+    multiColorVinyl: {
+      name: 'Multi-Color Vinyl',
+      description: 'Layered design with 4-6 colors',
+      settings: {
+        mode: 'multicolor' as const,
+        detail: 50,
+        smoothing: 60,
+        colorLayers: 5,
+        minAreaThreshold: 0.5,
+        removeEdgeRegions: true,
+        minRegionSize: 0.5,
+        erosionLevel: 1,
+      },
+    },
+    stencil: {
+      name: 'Stencil',
+      description: 'Outlines for painting or etching',
+      settings: {
+        mode: 'lineart' as const,
+        detail: 60,
+        smoothing: 50,
+        removeEdgeRegions: false,
+        minRegionSize: 0.5,
+        erosionLevel: 0,
+      },
+    },
+    detailedPrint: {
+      name: 'Detailed HTV',
+      description: 'High-detail for heat transfer vinyl',
+      settings: {
+        mode: 'silhouette' as const,
+        detail: 75,
+        smoothing: 40,
+        threshold: 128,
+        removeEdgeRegions: false,
+        minRegionSize: 0,
+        erosionLevel: 0,
+        invert: false,
+      },
+    },
+  };
+
+  // Apply a preset
+  const applyPreset = (presetKey: keyof typeof PRESETS) => {
+    const preset = PRESETS[presetKey];
+    onSettingsChange({
+      ...settings,
+      ...preset.settings,
+    });
+  };
+
+  // Apply minimal weeding preset (cleanup only)
   const applyMinimalWeedingPreset = () => {
     onSettingsChange({
       ...settings,
@@ -76,6 +143,31 @@ export function ControlsPanel({ settings, onSettingsChange, disabled }: Controls
   return (
     <div className="space-y-6">
       <h2 className="text-lg font-semibold text-gray-800">Conversion Settings</h2>
+
+      {/* Quick Start Presets */}
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <label className="block text-sm font-medium text-gray-700">Quick Start Presets</label>
+          <HelpTooltip text="Choose a preset to automatically configure all settings for common use cases. You can customize settings after applying a preset." />
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {Object.entries(PRESETS).map(([key, preset]) => (
+            <button
+              key={key}
+              onClick={() => applyPreset(key as keyof typeof PRESETS)}
+              disabled={disabled}
+              className={`
+                p-2 rounded-lg border text-left transition-all text-sm
+                border-gray-200 hover:border-primary-400 hover:bg-primary-50
+                ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
+              `}
+            >
+              <div className="font-medium text-gray-800">{preset.name}</div>
+              <div className="text-xs text-gray-500">{preset.description}</div>
+            </button>
+          ))}
+        </div>
+      </div>
 
       {/* Mode Selection */}
       <div className="space-y-2">

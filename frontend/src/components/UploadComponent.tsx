@@ -9,7 +9,16 @@ interface UploadComponentProps {
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_DIMENSION = 4000;
-const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/bmp'];
+const ACCEPTED_TYPES = [
+  'image/png',
+  'image/jpeg',
+  'image/jpg',
+  'image/gif',
+  'image/bmp',
+  'image/webp',
+  'image/heic',
+  'image/heif',
+];
 
 export function UploadComponent({ onImageSelect, currentImage, metadata }: UploadComponentProps) {
   const [isDragging, setIsDragging] = useState(false);
@@ -19,9 +28,13 @@ export function UploadComponent({ onImageSelect, currentImage, metadata }: Uploa
   const validateAndProcessFile = useCallback(async (file: File) => {
     setError(null);
 
-    // Validate file type
-    if (!ACCEPTED_TYPES.includes(file.type)) {
-      setError('Invalid file type. Please upload PNG, JPG, GIF, or BMP images.');
+    // Validate file type - also check file extension for HEIC which may not have correct MIME
+    const fileExtension = file.name.toLowerCase().split('.').pop();
+    const isValidType = ACCEPTED_TYPES.includes(file.type) ||
+      ['heic', 'heif', 'webp'].includes(fileExtension || '');
+
+    if (!isValidType) {
+      setError('Invalid file type. Please upload PNG, JPG, GIF, BMP, WebP, or HEIC images.');
       return;
     }
 
@@ -123,7 +136,7 @@ export function UploadComponent({ onImageSelect, currentImage, metadata }: Uploa
         <input
           ref={fileInputRef}
           type="file"
-          accept=".png,.jpg,.jpeg,.gif,.bmp"
+          accept=".png,.jpg,.jpeg,.gif,.bmp,.webp,.heic,.heif"
           onChange={handleFileSelect}
           className="hidden"
         />
@@ -151,7 +164,7 @@ export function UploadComponent({ onImageSelect, currentImage, metadata }: Uploa
               <p className="text-sm text-gray-500">or click to browse</p>
             </div>
             <p className="text-xs text-gray-400">
-              PNG, JPG, GIF, BMP up to 10MB
+              PNG, JPG, WebP, HEIC, GIF, BMP up to 10MB
             </p>
           </div>
         )}
