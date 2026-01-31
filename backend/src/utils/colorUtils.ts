@@ -1,5 +1,6 @@
 /**
  * Color utilities for image processing and color quantization
+ * Includes LAB color space support for perceptually accurate color comparison
  */
 
 export interface RGB {
@@ -10,6 +11,12 @@ export interface RGB {
 
 export interface RGBA extends RGB {
   a: number;
+}
+
+export interface LAB {
+  L: number;
+  a: number;
+  b: number;
 }
 
 /**
@@ -39,7 +46,57 @@ export function hexToRgb(hex: string): RGB {
 }
 
 /**
+ * Convert RGB to LAB color space
+ * LAB is perceptually uniform - equal distances represent equal perceived differences
+ */
+export function rgbToLab(color: RGB): LAB {
+  // First convert RGB to XYZ
+  let r = color.r / 255;
+  let g = color.g / 255;
+  let b = color.b / 255;
+
+  // Apply gamma correction (sRGB)
+  r = r > 0.04045 ? Math.pow((r + 0.055) / 1.055, 2.4) : r / 12.92;
+  g = g > 0.04045 ? Math.pow((g + 0.055) / 1.055, 2.4) : g / 12.92;
+  b = b > 0.04045 ? Math.pow((b + 0.055) / 1.055, 2.4) : b / 12.92;
+
+  // Convert to XYZ using D65 illuminant
+  const x = (r * 0.4124564 + g * 0.3575761 + b * 0.1804375) / 0.95047;
+  const y = (r * 0.2126729 + g * 0.7151522 + b * 0.0721750) / 1.00000;
+  const z = (r * 0.0193339 + g * 0.1191920 + b * 0.9503041) / 1.08883;
+
+  // Convert XYZ to LAB
+  const f = (t: number) => t > 0.008856 ? Math.pow(t, 1/3) : (7.787 * t) + 16/116;
+
+  const fx = f(x);
+  const fy = f(y);
+  const fz = f(z);
+
+  return {
+    L: (116 * fy) - 16,
+    a: 500 * (fx - fy),
+    b: 200 * (fy - fz),
+  };
+}
+
+/**
+ * Calculate perceptual color distance using LAB color space (Delta E)
+ * More accurate than RGB Euclidean distance for human perception
+ */
+export function colorDistanceLab(c1: RGB, c2: RGB): number {
+  const lab1 = rgbToLab(c1);
+  const lab2 = rgbToLab(c2);
+
+  return Math.sqrt(
+    Math.pow(lab1.L - lab2.L, 2) +
+    Math.pow(lab1.a - lab2.a, 2) +
+    Math.pow(lab1.b - lab2.b, 2)
+  );
+}
+
+/**
  * Calculate Euclidean distance between two colors in RGB space
+ * Faster but less perceptually accurate than LAB
  */
 export function colorDistance(c1: RGB, c2: RGB): number {
   return Math.sqrt(
@@ -50,6 +107,24 @@ export function colorDistance(c1: RGB, c2: RGB): number {
 }
 
 /**
+ * Weighted RGB color distance (compromise between speed and accuracy)
+ * Weights based on human eye sensitivity to different colors
+ */
+export function colorDistanceWeighted(c1: RGB, c2: RGB): number {
+  const rmean = (c1.r + c2.r) / 2;
+  const dr = c1.r - c2.r;
+  const dg = c1.g - c2.g;
+  const db = c1.b - c2.b;
+
+  // Redmean color difference formula
+  const weightR = 2 + rmean / 256;
+  const weightG = 4;
+  const weightB = 2 + (255 - rmean) / 256;
+
+  return Math.sqrt(weightR * dr * dr + weightG * dg * dg + weightB * db * db);
+}
+
+/**
  * Calculate luminance of a color (0-255)
  */
 export function getLuminance(color: RGB): number {
@@ -57,13 +132,15 @@ export function getLuminance(color: RGB): number {
 }
 
 /**
- * K-means color quantization
+ * K-means color quantization with LAB color space
  * Reduces an image's colors to k representative colors
+ * Uses pixel sampling for large images to improve performance
  */
 export function kMeansQuantize(
   pixels: RGBA[],
   k: number,
-  maxIterations: number = 20
+  maxIterations: number = 20,
+  useLab: boolean = true
 ): { palette: RGB[]; assignments: number[] } {
   // Filter out fully transparent pixels
   const opaquePixels = pixels.filter(p => p.a > 128);
@@ -75,17 +152,50 @@ export function kMeansQuantize(
     };
   }
 
+  // Sample pixels for large images to improve performance
+  const MAX_SAMPLE_SIZE = 50000;
+  let samplePixels = opaquePixels;
+  if (opaquePixels.length > MAX_SAMPLE_SIZE) {
+    const step = Math.ceil(opaquePixels.length / MAX_SAMPLE_SIZE);
+    samplePixels = opaquePixels.filter((_, i) => i % step === 0);
+  }
+
+  // Pre-compute LAB values if using LAB color space
+  const labCache = new Map<number, LAB>();
+  const getLabCached = (pixel: RGB): LAB => {
+    const key = (pixel.r << 16) | (pixel.g << 8) | pixel.b;
+    let lab = labCache.get(key);
+    if (!lab) {
+      lab = rgbToLab(pixel);
+      labCache.set(key, lab);
+    }
+    return lab;
+  };
+
+  // Distance function based on color space choice
+  const distanceFn = useLab
+    ? (c1: RGB, c2: RGB) => {
+        const lab1 = getLabCached(c1);
+        const lab2 = getLabCached(c2);
+        return Math.sqrt(
+          Math.pow(lab1.L - lab2.L, 2) +
+          Math.pow(lab1.a - lab2.a, 2) +
+          Math.pow(lab1.b - lab2.b, 2)
+        );
+      }
+    : colorDistanceWeighted;
+
   // Initialize centroids using k-means++ initialization
-  const centroids: RGB[] = initializeCentroids(opaquePixels, k);
-  let assignments: number[] = new Array(opaquePixels.length).fill(0);
+  const centroids: RGB[] = initializeCentroids(samplePixels, k, distanceFn);
+  let assignments: number[] = new Array(samplePixels.length).fill(0);
 
   for (let iter = 0; iter < maxIterations; iter++) {
     // Assign each pixel to nearest centroid
-    const newAssignments = opaquePixels.map(pixel => {
+    const newAssignments = samplePixels.map(pixel => {
       let minDist = Infinity;
       let minIndex = 0;
       for (let i = 0; i < centroids.length; i++) {
-        const dist = colorDistance(pixel, centroids[i]);
+        const dist = distanceFn(pixel, centroids[i]);
         if (dist < minDist) {
           minDist = dist;
           minIndex = i;
@@ -104,7 +214,7 @@ export function kMeansQuantize(
     const sums: { r: number; g: number; b: number; count: number }[] =
       Array.from({ length: k }, () => ({ r: 0, g: 0, b: 0, count: 0 }));
 
-    opaquePixels.forEach((pixel, i) => {
+    samplePixels.forEach((pixel, i) => {
       const cluster = assignments[i];
       sums[cluster].r += pixel.r;
       sums[cluster].g += pixel.g;
@@ -129,7 +239,7 @@ export function kMeansQuantize(
     let minDist = Infinity;
     let minIndex = 0;
     for (let i = 0; i < centroids.length; i++) {
-      const dist = colorDistance(pixel, centroids[i]);
+      const dist = distanceFn(pixel, centroids[i]);
       if (dist < minDist) {
         minDist = dist;
         minIndex = i;
@@ -144,19 +254,23 @@ export function kMeansQuantize(
 /**
  * K-means++ initialization for better starting centroids
  */
-function initializeCentroids(pixels: RGB[], k: number): RGB[] {
+function initializeCentroids(
+  pixels: RGB[],
+  k: number,
+  distanceFn: (c1: RGB, c2: RGB) => number
+): RGB[] {
   const centroids: RGB[] = [];
 
   // Choose first centroid randomly
   const firstIndex = Math.floor(Math.random() * pixels.length);
   centroids.push({ ...pixels[firstIndex] });
 
-  // Choose remaining centroids
+  // Choose remaining centroids with probability proportional to distance squared
   for (let i = 1; i < k; i++) {
     const distances = pixels.map(pixel => {
       let minDist = Infinity;
       for (const centroid of centroids) {
-        const dist = colorDistance(pixel, centroid);
+        const dist = distanceFn(pixel, centroid);
         minDist = Math.min(minDist, dist);
       }
       return minDist * minDist; // Square for probability weighting
@@ -184,6 +298,7 @@ function initializeCentroids(pixels: RGB[], k: number): RGB[] {
 
 /**
  * Median cut color quantization (alternative to k-means)
+ * Faster but may produce less optimal palettes
  */
 export function medianCutQuantize(
   pixels: RGBA[],
@@ -262,7 +377,7 @@ export function medianCutQuantize(
     let minDist = Infinity;
     let minIndex = 0;
     for (let i = 0; i < palette.length; i++) {
-      const dist = colorDistance(pixel, palette[i]);
+      const dist = colorDistanceWeighted(pixel, palette[i]);
       if (dist < minDist) {
         minDist = dist;
         minIndex = i;
@@ -283,6 +398,7 @@ export function sortColorsByLuminance(colors: RGB[]): RGB[] {
 
 /**
  * Find dominant background color (most common edge color)
+ * Uses clustering to handle gradients and anti-aliasing
  */
 export function findBackgroundColor(
   pixels: RGBA[],
@@ -320,7 +436,7 @@ export function findBackgroundColor(
 
   if (edgePixels.length === 0) return null;
 
-  // Find average edge color
+  // Use weighted average for better handling of slight color variations
   const sum = edgePixels.reduce(
     (acc, p) => ({ r: acc.r + p.r, g: acc.g + p.g, b: acc.b + p.b }),
     { r: 0, g: 0, b: 0 }

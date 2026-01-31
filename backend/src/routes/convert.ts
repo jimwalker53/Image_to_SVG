@@ -2,7 +2,17 @@ import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
 import { vectorizer } from '../services/vectorizer.js';
-import { DEFAULT_SETTINGS, type VectorizationSettings } from '../types/index.js';
+import { DEFAULT_SETTINGS, type VectorizationSettings, type ConversionResult } from '../types/index.js';
+
+// Cricut Design Space limits and thresholds
+const CRICUT_LIMITS = {
+  MAX_FILE_SIZE_BYTES: 2 * 1024 * 1024, // 2MB recommended
+  MAX_DIMENSION_INCHES: 23.5, // Standard Cricut Maker mat width
+  MAX_PATHS: 5000,
+  MAX_POINTS: 10000,
+  WARN_PATHS: 2000,
+  WARN_POINTS: 5000,
+};
 
 const router = Router();
 
@@ -14,11 +24,22 @@ const upload = multer({
     fileSize: 10 * 1024 * 1024, // 10MB max
   },
   fileFilter: (req, file, cb) => {
-    const allowedMimes = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/bmp'];
-    if (allowedMimes.includes(file.mimetype)) {
+    const allowedMimes = [
+      'image/png',
+      'image/jpeg',
+      'image/jpg',
+      'image/gif',
+      'image/bmp',
+      'image/webp',
+      'image/heic',
+      'image/heif',
+    ];
+    // Also check file extension for HEIC which may have incorrect MIME type
+    const ext = file.originalname.toLowerCase().split('.').pop();
+    if (allowedMimes.includes(file.mimetype) || ['heic', 'heif', 'webp'].includes(ext || '')) {
       cb(null, true);
     } else {
-      cb(new Error('Invalid file type. Allowed: PNG, JPG, JPEG, GIF, BMP'));
+      cb(new Error('Invalid file type. Allowed: PNG, JPG, WebP, HEIC, GIF, BMP'));
     }
   },
 });
@@ -82,16 +103,18 @@ router.post('/', upload.single('image'), async (req: Request, res: Response) => 
     const runtime = Date.now() - startTime;
     console.log(`[${requestId}] Conversion complete in ${runtime}ms`);
 
-    // Check for complexity warning
-    const complexityWarning = result.stats.totalPoints > 10000
-      ? 'Warning: High path complexity may cause slowness in Cricut Design Space. Consider reducing detail or simplifying the image.'
-      : null;
+    // Check for Cricut-aware warnings
+    const warnings = generateCricutWarnings(result, settings);
 
     return res.json({
       svg: result.svg,
       layers: result.layers,
-      stats: result.stats,
-      warning: complexityWarning,
+      stats: {
+        ...result.stats,
+        svgSizeBytes: Buffer.byteLength(result.svg, 'utf8'),
+      },
+      warnings,
+      warning: warnings.length > 0 ? warnings[0] : null,
       requestId,
     });
 
@@ -170,16 +193,18 @@ router.post('/base64', async (req: Request, res: Response) => {
     const runtime = Date.now() - startTime;
     console.log(`[${requestId}] Conversion complete in ${runtime}ms`);
 
-    // Check for complexity warning
-    const complexityWarning = result.stats.totalPoints > 10000
-      ? 'Warning: High path complexity may cause slowness in Cricut Design Space. Consider reducing detail or simplifying the image.'
-      : null;
+    // Check for Cricut-aware warnings
+    const warnings = generateCricutWarnings(result, settings);
 
     return res.json({
       svg: result.svg,
       layers: result.layers,
-      stats: result.stats,
-      warning: complexityWarning,
+      stats: {
+        ...result.stats,
+        svgSizeBytes: Buffer.byteLength(result.svg, 'utf8'),
+      },
+      warnings,
+      warning: warnings.length > 0 ? warnings[0] : null,
       requestId,
     });
 
@@ -231,6 +256,66 @@ function validateSettings(settings: VectorizationSettings): string | null {
   }
 
   return null;
+}
+
+/**
+ * Generate Cricut-aware warnings based on conversion result
+ */
+function generateCricutWarnings(
+  result: ConversionResult,
+  settings: VectorizationSettings
+): string[] {
+  const warnings: string[] = [];
+  const svgSize = Buffer.byteLength(result.svg, 'utf8');
+
+  // File size warning (Cricut Design Space may struggle with large files)
+  if (svgSize > CRICUT_LIMITS.MAX_FILE_SIZE_BYTES) {
+    const sizeMB = (svgSize / (1024 * 1024)).toFixed(1);
+    warnings.push(
+      `Large file size (${sizeMB}MB). Files over 2MB may upload slowly or fail in Cricut Design Space. Consider reducing detail level.`
+    );
+  }
+
+  // Path count warning
+  if (result.stats.totalPaths > CRICUT_LIMITS.MAX_PATHS) {
+    warnings.push(
+      `Very high path count (${result.stats.totalPaths.toLocaleString()}). This may cause Cricut Design Space to freeze. Reduce detail or simplify the image.`
+    );
+  } else if (result.stats.totalPaths > CRICUT_LIMITS.WARN_PATHS) {
+    warnings.push(
+      `High path count (${result.stats.totalPaths.toLocaleString()}). Complex designs may cut slowly. Consider reducing detail.`
+    );
+  }
+
+  // Point count warning
+  if (result.stats.totalPoints > CRICUT_LIMITS.MAX_POINTS) {
+    warnings.push(
+      `Very high point count (${result.stats.totalPoints.toLocaleString()}). This complexity may cause issues in Cricut Design Space.`
+    );
+  } else if (result.stats.totalPoints > CRICUT_LIMITS.WARN_POINTS) {
+    warnings.push(
+      `High point count (${result.stats.totalPoints.toLocaleString()}). Complex paths may slow down Design Space.`
+    );
+  }
+
+  // Dimension warnings
+  const maxDimension = Math.max(settings.targetWidth, settings.targetHeight);
+  const dimensionInInches = settings.unit === 'mm' ? maxDimension / 25.4 : maxDimension;
+
+  if (dimensionInInches > CRICUT_LIMITS.MAX_DIMENSION_INCHES) {
+    warnings.push(
+      `Design is ${dimensionInInches.toFixed(1)}" wide/tall, exceeding standard Cricut mat size (${CRICUT_LIMITS.MAX_DIMENSION_INCHES}"). You may need to resize or tile the design.`
+    );
+  }
+
+  // Layer count warning for multicolor
+  if (result.layers.length > 8) {
+    warnings.push(
+      `Many color layers (${result.layers.length}). Each layer requires separate vinyl and alignment. Consider reducing colors.`
+    );
+  }
+
+  return warnings;
 }
 
 export default router;
