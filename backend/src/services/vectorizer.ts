@@ -36,7 +36,8 @@ async function applyCleanupOptions(
   imageBuffer: Buffer,
   settings: VectorizationSettings,
   width: number,
-  height: number
+  height: number,
+  alreadyBinary: boolean = false
 ): Promise<Buffer> {
   // Get raw pixel data
   const { data } = await sharp(imageBuffer)
@@ -47,13 +48,15 @@ async function applyCleanupOptions(
   // Convert to mutable array
   let pixels = new Uint8Array(data.buffer, data.byteOffset, data.length);
 
-  // Apply threshold first to get binary image
-  const threshold = settings.threshold ?? 128;
-  const binaryPixels = new Uint8Array(pixels.length);
-  for (let i = 0; i < pixels.length; i++) {
-    binaryPixels[i] = pixels[i] < threshold ? 0 : 255;
+  // Apply threshold first to get binary image (if not already binary)
+  if (!alreadyBinary) {
+    const threshold = settings.threshold ?? 128;
+    const binaryPixels = new Uint8Array(pixels.length);
+    for (let i = 0; i < pixels.length; i++) {
+      binaryPixels[i] = pixels[i] < threshold ? 0 : 255;
+    }
+    pixels = binaryPixels;
   }
-  pixels = binaryPixels;
 
   // Apply invert if requested (swap black and white)
   if (settings.invert) {
@@ -61,6 +64,44 @@ async function applyCleanupOptions(
       pixels[i] = pixels[i] === 0 ? 255 : 0;
     }
   }
+
+  // Apply erosion if requested (shrinks black regions)
+  if (settings.erosionLevel > 0) {
+    pixels = applyErosion(pixels, width, height, settings.erosionLevel);
+  }
+
+  // Remove edge-connected regions if requested
+  if (settings.removeEdgeRegions) {
+    pixels = removeEdgeConnectedRegions(pixels, width, height);
+  }
+
+  // Remove small regions based on minRegionSize
+  if (settings.minRegionSize > 0) {
+    pixels = removeSmallRegions(pixels, width, height, settings.minRegionSize);
+  }
+
+  // Convert back to PNG buffer
+  return sharp(Buffer.from(pixels.buffer), {
+    raw: { width, height, channels: 1 }
+  }).png().toBuffer();
+}
+
+/**
+ * Apply cleanup to a binary layer (used for multicolor/lineart modes)
+ * Only applies minRegionSize and erosion (no threshold or invert)
+ */
+async function applyLayerCleanup(
+  binaryData: Buffer,
+  settings: VectorizationSettings,
+  width: number,
+  height: number
+): Promise<Buffer> {
+  // Get raw pixel data
+  const { data } = await sharp(binaryData, {
+    raw: { width, height, channels: 1 }
+  }).raw().toBuffer({ resolveWithObject: true });
+
+  let pixels = new Uint8Array(data.buffer, data.byteOffset, data.length);
 
   // Apply erosion if requested (shrinks black regions)
   if (settings.erosionLevel > 0) {
@@ -391,8 +432,8 @@ export class Vectorizer {
       }
     }
 
-    // Quantize colors
-    const { palette, assignments } = kMeansQuantize(pixels, settings.colorLayers);
+    // Quantize colors using LAB color space for better perceptual accuracy
+    const { palette, assignments } = kMeansQuantize(pixels, settings.colorLayers, 20, true);
     const sortedPalette = sortColorsByLuminance(palette);
 
     // Map old indices to new sorted indices
@@ -403,6 +444,11 @@ export class Vectorizer {
       );
       paletteMap.set(oldIndex, newIndex);
     });
+
+    // Check if cleanup options are enabled
+    const hasCleanupOptions = settings.erosionLevel > 0 ||
+                              settings.removeEdgeRegions ||
+                              settings.minRegionSize > 0;
 
     // Process each color layer
     const allLayerPaths: { paths: string[]; color: string; name: string }[] = [];
@@ -423,14 +469,20 @@ export class Vectorizer {
         binaryData[i] = mappedAssignment === colorIndex ? 0 : 255;
       });
 
-      // Create PNG from binary data
-      const binaryPng = await sharp(binaryData, {
-        raw: { width: info.width, height: info.height, channels: 1 }
-      }).png().toBuffer();
+      // Apply cleanup to this color layer if options are enabled
+      let processedBinaryPng: Buffer;
+      if (hasCleanupOptions) {
+        processedBinaryPng = await applyLayerCleanup(binaryData, settings, info.width, info.height);
+      } else {
+        // Create PNG from binary data
+        processedBinaryPng = await sharp(binaryData, {
+          raw: { width: info.width, height: info.height, channels: 1 }
+        }).png().toBuffer();
+      }
 
       // Trace this color
       try {
-        const svgString = await potraceTrace(binaryPng, {
+        const svgString = await potraceTrace(processedBinaryPng, {
           turdSize: Math.max(2, Math.floor((100 - settings.detail) / 10)),
           optTolerance: this.detailToTolerance(settings.detail),
           threshold: 128,
@@ -479,25 +531,86 @@ export class Vectorizer {
     width: number,
     height: number
   ): Promise<{ svg: string; layers: LayerInfo[] }> {
-    // Use sharp's edge detection via convolution (Sobel-like)
-    // First convert to grayscale, then use Canny-style edge detection
-    const edgeBuffer = await sharp(imageBuffer)
+    // Use Sobel edge detection for better results than Laplacian
+    // Sobel detects edges in X and Y directions separately, then combines them
+
+    // Get grayscale image
+    const grayBuffer = await sharp(imageBuffer)
       .grayscale()
-      .convolve({
-        width: 3,
-        height: 3,
-        kernel: [-1, -1, -1, -1, 8, -1, -1, -1, -1], // Laplacian edge detection
-      })
-      .negate() // Invert so edges are black on white
-      .normalize() // Enhance contrast
-      .png()
+      .raw()
       .toBuffer();
 
+    // Apply Sobel edge detection manually for better control
+    const sobelX = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
+    const sobelY = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
+
+    const edgeData = new Uint8Array(width * height);
+    const grayPixels = new Uint8Array(grayBuffer.buffer, grayBuffer.byteOffset, grayBuffer.length);
+
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        let gx = 0;
+        let gy = 0;
+
+        // Apply Sobel kernels
+        for (let ky = -1; ky <= 1; ky++) {
+          for (let kx = -1; kx <= 1; kx++) {
+            const idx = (y + ky) * width + (x + kx);
+            const kernelIdx = (ky + 1) * 3 + (kx + 1);
+            gx += grayPixels[idx] * sobelX[kernelIdx];
+            gy += grayPixels[idx] * sobelY[kernelIdx];
+          }
+        }
+
+        // Calculate gradient magnitude
+        const magnitude = Math.sqrt(gx * gx + gy * gy);
+        // Normalize and invert (edges become black)
+        const edgeValue = Math.min(255, magnitude);
+        edgeData[y * width + x] = edgeValue < (255 - settings.detail * 2) ? 255 : 0;
+      }
+    }
+
+    // Check if cleanup options are enabled
+    const hasCleanupOptions = settings.erosionLevel > 0 ||
+                              settings.removeEdgeRegions ||
+                              settings.minRegionSize > 0;
+
+    let processedBuffer: Buffer;
+
+    if (hasCleanupOptions) {
+      // Apply cleanup to the edge-detected image
+      // Use explicit Uint8Array type to handle ArrayBufferLike compatibility
+      let pixels: Uint8Array = new Uint8Array(edgeData);
+
+      // Apply erosion if requested
+      if (settings.erosionLevel > 0) {
+        pixels = applyErosion(pixels, width, height, settings.erosionLevel);
+      }
+
+      // Remove edge-connected regions if requested
+      if (settings.removeEdgeRegions) {
+        pixels = removeEdgeConnectedRegions(pixels, width, height);
+      }
+
+      // Remove small regions based on minRegionSize
+      if (settings.minRegionSize > 0) {
+        pixels = removeSmallRegions(pixels, width, height, settings.minRegionSize);
+      }
+
+      processedBuffer = await sharp(Buffer.from(pixels), {
+        raw: { width, height, channels: 1 }
+      }).png().toBuffer();
+    } else {
+      processedBuffer = await sharp(Buffer.from(edgeData.buffer), {
+        raw: { width, height, channels: 1 }
+      }).png().toBuffer();
+    }
+
     // Trace edges
-    const svgString = await potraceTrace(edgeBuffer, {
+    const svgString = await potraceTrace(processedBuffer, {
       turdSize: Math.max(2, Math.floor((100 - settings.detail) / 5)),
       optTolerance: this.detailToTolerance(settings.detail),
-      threshold: 128 + Math.floor((50 - settings.detail / 2)),
+      threshold: 128,
       blackOnWhite: true,
     });
 

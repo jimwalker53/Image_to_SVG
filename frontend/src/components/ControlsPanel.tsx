@@ -27,9 +27,26 @@ const HELP_TEXT = {
   outputSize: 'Sets the physical dimensions of your SVG when imported into Cricut Design Space. The design will appear at exactly this size on your canvas.',
   unit: 'Choose inches for US measurements or millimeters for metric. This affects how your design size displays in Cricut Design Space.',
   invert: 'Swaps what gets cut vs what gets removed. Normally black areas are cut. When inverted, white areas are cut instead. Useful when your subject is lighter than the background.',
-  removeEdgeRegions: 'Removes any black areas that touch the image border. This is great for removing ground shadows, backgrounds, or other elements connected to the edges that you do not want to cut.',
-  minRegionSize: 'Removes isolated black areas smaller than this percentage of the image. Helps eliminate small specks, noise, and tiny details that would be hard to weed.',
-  erosionLevel: 'Shrinks all black regions by this many pixels. This helps remove thin connecting lines and clean up edges. Higher values remove more material from the edges of shapes.',
+  removeEdgeRegions: {
+    silhouette: 'Removes any black areas that touch the image border. Great for removing ground shadows, backgrounds, or other elements connected to the edges.',
+    multicolor: 'Removes regions touching image borders from each color layer. Helps clean up edge artifacts and unwanted background elements.',
+    lineart: 'Removes edge-connected line segments. Useful for cleaning up border artifacts in traced outlines.',
+  },
+  minRegionSize: {
+    silhouette: 'Removes isolated black areas smaller than this percentage. Helps eliminate small specks, noise, and tiny details that would be hard to weed.',
+    multicolor: 'Removes small isolated regions from each color layer. Cleans up tiny specks and color artifacts for easier weeding.',
+    lineart: 'Removes small isolated line segments. Helps clean up noise and minor edge artifacts from the trace.',
+  },
+  erosionLevel: {
+    silhouette: 'Shrinks all black regions by this many pixels. Helps remove thin connecting lines and clean up edges.',
+    multicolor: 'Shrinks each color region. Helps separate colors that bleed into each other and removes thin connections.',
+    lineart: 'Thins the traced lines. Can help clean up thick or blobby line traces.',
+  },
+  cleanup: {
+    silhouette: 'These options help reduce the amount of vinyl you need to weed by removing unwanted dark areas like shadows, ground, or small specks.',
+    multicolor: 'These options help clean up each color layer by removing small artifacts, edge-connected regions, and thinning the cut areas.',
+    lineart: 'These options help clean up the line trace by removing noise, small segments, and edge artifacts.',
+  },
 };
 
 export function ControlsPanel({ settings, onSettingsChange, disabled }: ControlsPanelProps) {
@@ -309,56 +326,60 @@ export function ControlsPanel({ settings, onSettingsChange, disabled }: Controls
         <p className="text-xs text-gray-400">{HELP_TEXT.unit}</p>
       </div>
 
-      {/* Cleanup Options (Silhouette mode only) */}
-      {settings.mode === 'silhouette' && (
-        <div className="space-y-4 border-t border-gray-200 pt-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-semibold text-gray-700">Cleanup Options</h3>
-              <p className="text-xs text-gray-500">Reduce weeding by removing unwanted areas</p>
-            </div>
-            <HelpTooltip text="These options help reduce the amount of vinyl you need to weed by removing unwanted dark areas like shadows, ground, or small specks." />
+      {/* Cleanup Options (All modes) */}
+      <div className="space-y-4 border-t border-gray-200 pt-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-700">Cleanup Options</h3>
+            <p className="text-xs text-gray-500">
+              {settings.mode === 'silhouette' && 'Reduce weeding by removing unwanted areas'}
+              {settings.mode === 'multicolor' && 'Clean up color layers for easier weeding'}
+              {settings.mode === 'lineart' && 'Clean up traced lines and remove artifacts'}
+            </p>
           </div>
+          <HelpTooltip text={HELP_TEXT.cleanup[settings.mode]} />
+        </div>
 
-          {/* Minimal Weeding Preset Button */}
-          <button
-            onClick={applyMinimalWeedingPreset}
-            disabled={disabled}
-            className={`
-              w-full py-2 px-4 rounded-lg text-sm font-medium transition-all border-2
-              ${isMinimalWeedingActive
-                ? 'border-green-500 bg-green-50 text-green-700'
-                : 'border-primary-500 bg-primary-50 text-primary-700 hover:bg-primary-100'
-              }
-              ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
-            `}
-          >
-            <div className="flex items-center justify-center gap-2">
-              {isMinimalWeedingActive ? (
-                <>
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                  </svg>
-                  <span>Minimal Weeding Active</span>
-                </>
-              ) : (
-                <>
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                  </svg>
-                  <span>Apply Minimal Weeding Preset</span>
-                </>
-              )}
-            </div>
-          </button>
-          <p className="text-xs text-gray-500 text-center">
-            Automatically configures settings to reduce weeding effort
-          </p>
+        {/* Minimal Weeding Preset Button */}
+        <button
+          onClick={applyMinimalWeedingPreset}
+          disabled={disabled}
+          className={`
+            w-full py-2 px-4 rounded-lg text-sm font-medium transition-all border-2
+            ${isMinimalWeedingActive
+              ? 'border-green-500 bg-green-50 text-green-700'
+              : 'border-primary-500 bg-primary-50 text-primary-700 hover:bg-primary-100'
+            }
+            ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
+          `}
+        >
+          <div className="flex items-center justify-center gap-2">
+            {isMinimalWeedingActive ? (
+              <>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                <span>Minimal Weeding Active</span>
+              </>
+            ) : (
+              <>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+                <span>Apply Minimal Weeding Preset</span>
+              </>
+            )}
+          </div>
+        </button>
+        <p className="text-xs text-gray-500 text-center">
+          Automatically configures settings to reduce weeding effort
+        </p>
 
-          <div className="border-t border-gray-100 pt-3">
-            <p className="text-xs text-gray-500 mb-3">Or customize individual options:</p>
+        <div className="border-t border-gray-100 pt-3">
+          <p className="text-xs text-gray-500 mb-3">Or customize individual options:</p>
 
-            {/* Invert Toggle */}
+          {/* Invert Toggle (Silhouette mode only) */}
+          {settings.mode === 'silhouette' && (
             <label className="flex items-start gap-3 cursor-pointer mb-3">
               <input
                 type="checkbox"
@@ -375,77 +396,83 @@ export function ControlsPanel({ settings, onSettingsChange, disabled }: Controls
                 <p className="text-xs text-gray-500">Cut white areas instead of black</p>
               </div>
             </label>
+          )}
 
-            {/* Remove Edge Regions Toggle */}
-            <label className="flex items-start gap-3 cursor-pointer mb-3">
-              <input
-                type="checkbox"
-                checked={settings.removeEdgeRegions}
-                onChange={(e) => updateSetting('removeEdgeRegions', e.target.checked)}
-                disabled={disabled}
-                className="w-4 h-4 mt-0.5 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-              />
-              <div className="flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-gray-700">Remove Edge Regions</span>
-                  <HelpTooltip text={HELP_TEXT.removeEdgeRegions} />
-                </div>
-                <p className="text-xs text-gray-500">Remove ground/shadows touching borders</p>
+          {/* Remove Edge Regions Toggle */}
+          <label className="flex items-start gap-3 cursor-pointer mb-3">
+            <input
+              type="checkbox"
+              checked={settings.removeEdgeRegions}
+              onChange={(e) => updateSetting('removeEdgeRegions', e.target.checked)}
+              disabled={disabled}
+              className="w-4 h-4 mt-0.5 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+            />
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-gray-700">Remove Edge Regions</span>
+                <HelpTooltip text={HELP_TEXT.removeEdgeRegions[settings.mode]} />
               </div>
-            </label>
-
-            {/* Minimum Region Size */}
-            <div className="space-y-2 mb-3">
-              <div className="flex justify-between items-center">
-                <div className="flex items-center gap-2">
-                  <label className="text-sm font-medium text-gray-700">Min Region Size</label>
-                  <HelpTooltip text={HELP_TEXT.minRegionSize} />
-                </div>
-                <span className="text-sm text-gray-500">{settings.minRegionSize}%</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="5"
-                step="0.1"
-                value={settings.minRegionSize}
-                onChange={(e) => updateSetting('minRegionSize', parseFloat(e.target.value))}
-                disabled={disabled}
-                className="w-full"
-              />
-              <div className="flex justify-between text-xs text-gray-400">
-                <span>Keep all (0%)</span>
-                <span>Remove small (5%)</span>
-              </div>
+              <p className="text-xs text-gray-500">
+                {settings.mode === 'silhouette' && 'Remove ground/shadows touching borders'}
+                {settings.mode === 'multicolor' && 'Remove border-touching areas from layers'}
+                {settings.mode === 'lineart' && 'Remove edge-connected line segments'}
+              </p>
             </div>
+          </label>
 
-            {/* Erosion Level */}
-            <div className="space-y-2">
-              <div className="flex justify-between items-center">
-                <div className="flex items-center gap-2">
-                  <label className="text-sm font-medium text-gray-700">Erosion Level</label>
-                  <HelpTooltip text={HELP_TEXT.erosionLevel} />
-                </div>
-                <span className="text-sm text-gray-500">{settings.erosionLevel}</span>
+          {/* Minimum Region Size */}
+          <div className="space-y-2 mb-3">
+            <div className="flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium text-gray-700">Min Region Size</label>
+                <HelpTooltip text={HELP_TEXT.minRegionSize[settings.mode]} />
               </div>
-              <input
-                type="range"
-                min="0"
-                max="5"
-                step="1"
-                value={settings.erosionLevel}
-                onChange={(e) => updateSetting('erosionLevel', parseInt(e.target.value))}
-                disabled={disabled}
-                className="w-full"
-              />
-              <div className="flex justify-between text-xs text-gray-400">
-                <span>None (0)</span>
-                <span>Heavy (5)</span>
+              <span className="text-sm text-gray-500">{settings.minRegionSize}%</span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="5"
+              step="0.1"
+              value={settings.minRegionSize}
+              onChange={(e) => updateSetting('minRegionSize', parseFloat(e.target.value))}
+              disabled={disabled}
+              className="w-full"
+            />
+            <div className="flex justify-between text-xs text-gray-400">
+              <span>Keep all (0%)</span>
+              <span>Remove small (5%)</span>
+            </div>
+          </div>
+
+          {/* Erosion Level */}
+          <div className="space-y-2">
+            <div className="flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium text-gray-700">
+                  {settings.mode === 'lineart' ? 'Line Thinning' : 'Erosion Level'}
+                </label>
+                <HelpTooltip text={HELP_TEXT.erosionLevel[settings.mode]} />
               </div>
+              <span className="text-sm text-gray-500">{settings.erosionLevel}</span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="5"
+              step="1"
+              value={settings.erosionLevel}
+              onChange={(e) => updateSetting('erosionLevel', parseInt(e.target.value))}
+              disabled={disabled}
+              className="w-full"
+            />
+            <div className="flex justify-between text-xs text-gray-400">
+              <span>None (0)</span>
+              <span>Heavy (5)</span>
             </div>
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
